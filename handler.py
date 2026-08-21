@@ -123,6 +123,64 @@ def _parse_report(xml_bytes: bytes) -> tuple[str, list[dict]]:
             )
         logger.info("Parsed %d %s rows", len(results), report_name)
         return report_name, results
+    elif "XLAAARPT" in xml_text:
+        report_name = "Account Analysis Report"
+        logger.info("Detected report type: %s (XLAAARPT)", report_name)
+        ccid_groups = root.findall(".//CCID_S")
+        if not ccid_groups:
+            logger.error("Account Analysis XML had no CCID_S rows")
+            raise HTTPException(status_code=422, detail="Account Analysis XML had no CCID_S rows")
+
+        results = []
+        for ccid in ccid_groups:
+            code_combination = ccid.findtext(".//ACCOUNTING_CODE_COMBINATION")
+
+            begin_dr_raw = _to_number(ccid.findtext(".//ACCT_SUM_BAL_DR")) or 0.0
+            begin_cr_raw = _to_number(ccid.findtext(".//ACCT_SUM_BAL_CR")) or 0.0
+            period_dr = _to_number(ccid.findtext(".//ACCT_SUM_PR_DR")) or 0.0
+            period_cr = _to_number(ccid.findtext(".//ACCT_SUM_PR_CR")) or 0.0
+
+            # Net beginning balance, then split back to single-sided Dr/Cr
+            begin_net = begin_dr_raw - begin_cr_raw
+            begin_balance_dr = begin_net if begin_net >= 0 else 0.0
+            begin_balance_cr = -begin_net if begin_net < 0 else 0.0
+
+            # Net ending balance = beginning net + period net, then split
+            period_net = period_dr - period_cr
+            ending_net = begin_net + period_net
+            ending_balance_dr = ending_net if ending_net >= 0 else 0.0
+            ending_balance_cr = -ending_net if ending_net < 0 else 0.0
+
+            items = []
+            for jeline in ccid.findall(".//JELINE_ROW"):
+                source = jeline.findtext(".//JE_SOURCE_NAME") or jeline.findtext(".//APPLICATION_NAME")
+                number = jeline.findtext(".//TRANSACTION_NUMBER") or jeline.findtext(".//DOCUMENT_SEQUENCE_NUMBER")
+                debit = _to_number(jeline.findtext(".//ACCOUNTED_DR")) or 0.0
+                credit = _to_number(jeline.findtext(".//ACCOUNTED_CR")) or 0.0
+
+                items.append(
+                    {
+                        "source": source,
+                        "number": number,
+                        "debitBalance": round(debit, 2),
+                        "creditBalance": round(credit, 2),
+                    }
+                )
+
+            results.append(
+                {
+                    "codeCombination": code_combination,
+                    "beginBalance_debit": round(begin_balance_dr, 2),
+                    "beginBalance_credit": round(begin_balance_cr, 2),
+                    "periodBalance_debit": round(period_dr, 2),
+                    "periodBalance_credit": round(period_cr, 2),
+                    "endingBalance_debit": round(ending_balance_dr, 2),
+                    "endingBalance_credit": round(ending_balance_cr, 2),
+                    "items": items,
+                }
+            )
+        logger.info("Parsed %d %s rows", len(results), report_name)
+        return report_name, results
 
     else:
         logger.error("Unknown report type. XML does not contain GLTRBAL or DATA_DS.")
